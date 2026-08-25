@@ -1,0 +1,367 @@
+const $ = (id) => document.getElementById(id);
+
+const EMOJIS = ['😀','😂','🥹','😍','🥰','😎','🤔','😅','😭','😡','🤯','🥳','👍','👎','❤️','🔥','🎉','👏','🙏','💯','✅','❌','👀','🤝','💙','✨','😴','🤡','💀','😈','🤍','🫡','🤗','😏','🙃'];
+const QUICK_REACTIONS = ['👍','❤️','😂','🔥','😮','😢','👏'];
+
+const state = {
+  mode: 'register',
+  serverUrl: '',
+  accessToken: '',
+  me: null,
+  target: null,
+  conversations: [],
+  ws: null,
+  reconnectTimer: null,
+  refreshPromise: null,
+  lastRefreshError: null,
+  onlineUserIds: new Set(),
+  typingUsers: new Map(),
+  typingStopTimer: null,
+  config: { maxFileMb: 50, maxAvatarMb: 8, iceServers: [{ urls: ['stun:stun.l.google.com:19302'] }] },
+  preferences: { theme: 'dark', lowBandwidthCalls: true },
+  avatarUrls: new Map(),
+  mediaUrls: new Map(),
+  reactionMessageId: null,
+  currentMessages: [],
+  groupDraftMembers: [],
+  groupInfo: null,
+  callCueContext: null,
+  call: {
+    kind: null,
+    pc: null,
+    group: null,
+    groupPeers: new Map(),
+    localAudioStream: null,
+    screenStream: null,
+    screenSender: null,
+    screenSenders: new Map(),
+    target: null,
+    incomingOffer: null,
+    pendingIce: [],
+    incomingGroup: null,
+    muted: false,
+    minimized: false
+  }
+};
+
+function toast(message, ms = 2400) {
+  const el = $('toast');
+  el.textContent = message;
+  el.classList.remove('hidden');
+  clearTimeout(el._timer);
+  el._timer = setTimeout(() => el.classList.add('hidden'), ms);
+}
+
+function serverUrl() { return state.serverUrl.replace(/\/+$/, ''); }
+function wsUrl() { return serverUrl().replace(/^http:/, 'ws:').replace(/^https:/, 'wss:') + '/ws'; }
+function displayName(user) { return user?.displayName || user?.name || user?.username || 'Пользователь'; }
+function initialFor(user) { return displayName(user).trim().charAt(0) || user?.username?.charAt(0) || 'R'; }
+function isUserTarget() { return state.target?.kind === 'user'; }
+function isGroupTarget() { return state.target?.kind === 'group'; }
+
+function applyTheme(theme) {
+  const value = theme === 'light' ? 'light' : 'dark';
+  state.preferences.theme = value;
+  document.body.dataset.theme = value;
+}
+
+function openSettings() {
+  $('themeSelect').value = state.preferences.theme || 'dark';
+  $('lowBandwidthCallsInput').checked = state.preferences.lowBandwidthCalls !== false;
+  $('settingsModal').classList.remove('hidden');
+}
+
+async function saveSettings() {
+  const next = {
+    theme: $('themeSelect').value === 'light' ? 'light' : 'dark',
+    lowBandwidthCalls: Boolean($('lowBandwidthCallsInput').checked)
+  };
+  state.preferences = { ...state.preferences, ...next };
+  applyTheme(next.theme);
+  if (state.call.kind) {
+    await retunePeerSenders(state.call.pc);
+    for (const peer of state.call.groupPeers.values()) await retunePeerSenders(peer.pc);
+    const screenTrack = state.call.screenStream?.getVideoTracks?.()[0];
+    if (screenTrack) {
+      try { await screenTrack.applyConstraints({ frameRate:{ ideal:next.lowBandwidthCalls ? 12 : 24, max:next.lowBandwidthCalls ? 15 : 30 } }); } catch {}
+    }
+  }
+  try {
+    const saved = await window.rodnikNative.setPreferences?.(next);
+    if (saved) state.preferences = { ...state.preferences, ...saved };
+    $('settingsModal').classList.add('hidden');
+    toast('Настройки сохранены.');
+  } catch {
+    toast('Не удалось сохранить настройки.');
+  }
+}
+
+async function rawApi(path, options = {}) { return fetch(serverUrl() + path, options); }
+
+async function refreshSession() {
+  if (state.refreshPromise) return state.refreshPromise;
+  state.refreshPromise = (async () => {
+    let candidates = [];
+    try {
+      if (window.rodnikNative.getRefreshTokenCandidates) candidates = await window.rodnikNative.getRefreshTokenCandidates();
+      else {
+        const one = await window.rodnikNative.getRefreshToken();
+        if (one) candidates = [one];
+      }
+    } catch {}
+    candidates = [...new Set((Array.isArray(candidates) ? candidates : []).filter(Boolean))];
+    if (!candidates.length) { state.lastRefreshError = 'missing'; return false; }
+
+    let sawUnauthorized = false;
+    let sawServerError = false;
+    for (const refreshToken of candidates) {
+      try {
+        const response = await rawApi('/api/auth/refresh', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ refreshToken })
+        });
+        if (response.status === 401) { sawUnauthorized = true; continue; }
+        if (!response.ok) { sawServerError = true; continue; }
+
+        const data = await response.json();
+        state.accessToken = data.accessToken;
+        state.me = data.user;
+        state.lastRefreshError = null;
+        // Persist whichever candidate actually worked. This is what completes
+        // the Knock -> Rodnik session migration without asking for a password.
+        await window.rodnikNative.setRefreshToken(data.refreshToken || refreshToken);
+        await window.rodnikNative.setCachedUser?.(data.user);
+        return true;
+      } catch {
+        state.lastRefreshError = 'network';
+        return false;
+      }
+    }
+
+    if (sawServerError) { state.lastRefreshError = 'server'; return false; }
+    if (sawUnauthorized) {
+      state.lastRefreshError = 'invalid';
+      await window.rodnikNative.clearSession();
+      return false;
+    }
+    state.lastRefreshError = 'missing';
+    return false;
+  })();
+  try { return await state.refreshPromise; }
+  finally { state.refreshPromise = null; }
+}
+async function api(path, options = {}, retry = true) {
+  const headers = new Headers(options.headers || {});
+  if (state.accessToken) headers.set('Authorization', `Bearer ${state.accessToken}`);
+  const response = await rawApi(path, { ...options, headers });
+  if (response.status === 401 && retry && await refreshSession()) return api(path, options, false);
+  return response;
+}
+
+function setAuthMode(mode) {
+  state.mode = mode;
+  $('registerTab').classList.toggle('active', mode === 'register');
+  $('loginTab').classList.toggle('active', mode === 'login');
+  $('authSubmit').textContent = mode === 'register' ? 'Создать аккаунт' : 'Войти';
+  $('passwordInput').autocomplete = mode === 'register' ? 'new-password' : 'current-password';
+  $('authError').classList.add('hidden');
+  $('switchToLogin').classList.add('hidden');
+}
+
+function showAuthError(message, canLogin = false) {
+  $('authError').textContent = message;
+  $('authError').classList.remove('hidden');
+  $('switchToLogin').classList.toggle('hidden', !canLogin);
+}
+
+async function saveServer() {
+  let url = $('serverInput').value.trim();
+  try {
+    const parsed = new URL(url);
+    if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error();
+    url = parsed.origin;
+  } catch {
+    showAuthError('Введите адрес сервера, например https://chat.example.com');
+    return false;
+  }
+  state.serverUrl = url;
+  $('serverInput').value = url;
+  await window.rodnikNative.setServerUrl(url);
+  return true;
+}
+
+async function handleAuth(event) {
+  event.preventDefault();
+  if (!(await saveServer())) return;
+  const username = $('usernameInput').value.trim();
+  const password = $('passwordInput').value;
+  $('authSubmit').disabled = true;
+  $('authSubmit').textContent = state.mode === 'register' ? 'Создаём...' : 'Входим...';
+  $('authError').classList.add('hidden');
+  $('switchToLogin').classList.add('hidden');
+  try {
+    const response = await rawApi(`/api/auth/${state.mode === 'register' ? 'register' : 'login'}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username, password })
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      showAuthError(data.message || 'Не удалось выполнить запрос.', data.error === 'USERNAME_TAKEN');
+      return;
+    }
+    state.accessToken = data.accessToken;
+    state.me = data.user;
+    state.lastRefreshError = null;
+    const saved = await window.rodnikNative.setRefreshToken(data.refreshToken);
+    await window.rodnikNative.setCachedUser?.(data.user);
+    if (!saved) toast('Windows не дала сохранить защищённую сессию.');
+    await enterApp();
+  } catch {
+    showAuthError('Не удалось подключиться к серверу. Проверьте адрес и доступность VDS.');
+  } finally {
+    $('authSubmit').disabled = false;
+    $('authSubmit').textContent = state.mode === 'register' ? 'Создать аккаунт' : 'Войти';
+  }
+}
+
+async function enterApp() {
+  $('authScreen').classList.add('hidden');
+  $('appScreen').classList.remove('hidden');
+  try {
+    const response = await api('/api/me');
+    if (response.ok) {
+      state.me = (await response.json()).user;
+      await window.rodnikNative.setCachedUser?.(state.me);
+    }
+  } catch {}
+  renderMe();
+  try { state.config = await rawApi('/api/config').then(r => r.json()); } catch {}
+  if (state.accessToken) {
+    await loadConversations();
+    connectWebSocket();
+  }
+  clearInterval(window._refreshInterval);
+  window._refreshInterval = setInterval(async () => {
+    if (await refreshSession()) { renderMe(); await loadConversations(); reconnectWebSocket(); }
+  }, 10 * 60_000);
+
+  // If the VDS was temporarily unreachable exactly while Rodnik restarted after
+  // an update, keep the user inside the app and recover the saved session in
+  // the background instead of showing the login form.
+  clearInterval(window._sessionRecoveryInterval);
+  if (!state.accessToken && state.me) {
+    window._sessionRecoveryInterval = setInterval(async () => {
+      if (!state.me || state.accessToken) return clearInterval(window._sessionRecoveryInterval);
+      if (await refreshSession()) {
+        clearInterval(window._sessionRecoveryInterval);
+        renderMe();
+        try { state.config = await rawApi('/api/config').then(r => r.json()); } catch {}
+        await loadConversations();
+        connectWebSocket();
+        toast('Соединение с Rodnik восстановлено.');
+      } else if (state.lastRefreshError === 'invalid' || state.lastRefreshError === 'missing') {
+        clearInterval(window._sessionRecoveryInterval);
+        state.me = null;
+        $('appScreen').classList.add('hidden');
+        $('authScreen').classList.remove('hidden');
+        setAuthMode('login');
+      }
+    }, 3500);
+  }
+}
+
+function renderMe() {
+  if (!state.me) return;
+  $('meDisplayName').textContent = displayName(state.me);
+  $('meUsername').textContent = `@${state.me.username}`;
+  setAvatar($('meAvatar'), state.me);
+}
+
+async function logout() {
+  const refreshToken = await window.rodnikNative.getRefreshToken();
+  try { await rawApi('/api/auth/logout', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ refreshToken }) }); } catch {}
+  await window.rodnikNative.clearSession();
+  state.accessToken = ''; state.me = null; state.target = null;
+  if (state.ws) state.ws.close();
+  cleanupCall(false);
+  revokeObjectUrls();
+  $('appScreen').classList.add('hidden');
+  $('authScreen').classList.remove('hidden');
+  setAuthMode('login');
+}
+
+function connectWebSocket() {
+  if (!state.accessToken || !state.me) return;
+  if (state.ws) { state.ws.onclose = null; try { state.ws.close(); } catch {} }
+  try {
+    const ws = new WebSocket(wsUrl());
+    state.ws = ws;
+    ws.onopen = () => ws.send(JSON.stringify({ type:'auth', token:state.accessToken }));
+    ws.onmessage = async event => { let msg; try { msg = JSON.parse(event.data); } catch { return; } await handleSocketEvent(msg); };
+    ws.onclose = () => {
+      clearTimeout(state.reconnectTimer);
+      state.reconnectTimer = setTimeout(async () => { if (!state.me) return; await refreshSession(); connectWebSocket(); }, 1800);
+    };
+  } catch {}
+}
+
+function reconnectWebSocket() { if (state.me) connectWebSocket(); }
+
+function signal(type, targetId, payload = null) {
+  if (!state.ws || state.ws.readyState !== WebSocket.OPEN) { toast('Нет соединения со звонковым сервером.'); return false; }
+  state.ws.send(JSON.stringify({ type, targetId, payload }));
+  return true;
+}
+
+function wsSend(event, quiet = false) {
+  if (!state.ws || state.ws.readyState !== WebSocket.OPEN) {
+    if (!quiet) toast('Нет соединения с сервером.');
+    return false;
+  }
+  state.ws.send(JSON.stringify(event));
+  return true;
+}
+
+function isUserOnline(userId) { return state.onlineUserIds.has(Number(userId)); }
+
+function currentTypingNames() {
+  if (!state.target) return [];
+  const now = Date.now();
+  const names = [];
+  for (const [key, item] of state.typingUsers.entries()) {
+    if (item.until < now) { state.typingUsers.delete(key); continue; }
+    if (state.target.kind === 'user' && item.kind === 'user' && item.user.id === state.target.data.id) names.push(displayName(item.user));
+    if (state.target.kind === 'group' && item.kind === 'group' && item.groupId === state.target.data.id) names.push(displayName(item.user));
+  }
+  return names;
+}
+
+function updatePeerStatus() {
+  if (!state.target) return;
+  const typing = currentTypingNames();
+  if (typing.length) {
+    $('peerSub').textContent = typing.length === 1 ? 'Печатает...' : `${typing.slice(0,2).join(', ')} печатают...`;
+    $('peerSub').classList.add('typing-status');
+    return;
+  }
+  $('peerSub').classList.remove('typing-status');
+  if (state.target.kind === 'user') $('peerSub').textContent = isUserOnline(state.target.data.id) ? 'В сети' : 'Не в сети';
+  else $('peerSub').textContent = `${state.target.data.memberCount || 0} участников`;
+}
+
+function sendTyping(active) {
+  if (!state.target || !state.me) return;
+  const payload = { active: Boolean(active) };
+  if (state.target.kind === 'user') payload.recipientId = state.target.data.id;
+  else payload.groupId = state.target.data.id;
+  wsSend({ type: 'typing', payload }, true);
+}
+
+function onComposerInput() {
+  resizeComposer();
+  if (!$('messageInput').value.trim()) { clearTimeout(state.typingStopTimer); sendTyping(false); return; }
+  sendTyping(true);
+  clearTimeout(state.typingStopTimer);
+  state.typingStopTimer = setTimeout(() => sendTyping(false), 1300);
+}
+
+function eventMatchesCurrentMessage(m) {
+  if (!state.target || !m) return false;
