@@ -1,0 +1,295 @@
+  if (state.target.kind === 'group') return Number(m.groupId) === state.target.data.id;
+  return !m.groupId && (Number(m.senderId) === state.target.data.id || Number(m.recipientId) === state.target.data.id);
+}
+
+function messagesNearBottom() {
+  const box = $('messages');
+  return !box || box.scrollHeight - box.scrollTop - box.clientHeight < 90;
+}
+
+async function handleSocketEvent(msg) {
+  if (msg.type === 'message.new') {
+    if (eventMatchesCurrentMessage(msg.payload) && document.visibilityState === 'visible') await loadMessages({ preserveScroll: !messagesNearBottom() });
+    await loadConversations();
+    return;
+  }
+  if (msg.type === 'message.reaction') { if (state.currentMessages.some(m => Number(m.id) === Number(msg.payload?.messageId))) await refreshMessageReactions(Number(msg.payload.messageId)); return; }
+  if (msg.type === 'message.read') { applyReadEvent(msg.payload); return; }
+  if (msg.type === 'group.created' || msg.type === 'group.updated') { await loadConversations(); if (msg.type === 'group.updated' && state.target?.kind === 'group' && Number(state.target.data.id) === Number(msg.payload?.group?.id)) { state.target.data = { ...state.target.data, ...msg.payload.group }; updatePeerStatus(); } return; }
+  if (msg.type === 'group.deleted') {
+    const groupId = Number(msg.payload?.groupId || 0);
+    if (state.call.kind === 'group' && Number(state.call.group?.id) === groupId) cleanupCall();
+    if (state.target?.kind === 'group' && Number(state.target.data.id) === groupId) {
+      state.target = null; state.currentMessages = []; $('chatView').classList.add('hidden'); $('emptyState').classList.remove('hidden');
+    }
+    $('groupInfoModal').classList.add('hidden');
+    await loadConversations();
+    toast('Группа удалена.');
+    return;
+  }
+  if (msg.type === 'auth.error') { if (await refreshSession()) reconnectWebSocket(); return; }
+  if (msg.type === 'presence.snapshot') {
+    state.onlineUserIds = new Set((msg.payload?.onlineUserIds || []).map(Number));
+    updatePeerStatus(); renderConversations(); return;
+  }
+  if (msg.type === 'presence.update') {
+    const id = Number(msg.payload?.userId);
+    if (msg.payload?.online) state.onlineUserIds.add(id); else state.onlineUserIds.delete(id);
+    updatePeerStatus(); renderConversations(); return;
+  }
+  if (msg.type === 'typing') {
+    const user = msg.from; if (!user?.id) return;
+    const groupId = Number(msg.payload?.groupId || 0);
+    const key = groupId ? `g:${groupId}:${user.id}` : `u:${user.id}`;
+    if (msg.payload?.active) state.typingUsers.set(key, { kind: groupId ? 'group' : 'user', groupId, user, until: Date.now() + 2200 });
+    else state.typingUsers.delete(key);
+    updatePeerStatus();
+    if (msg.payload?.active) setTimeout(updatePeerStatus, 2300);
+    return;
+  }
+
+  if (msg.type === 'group.call.invite') return incomingGroupCall(msg.from, msg.payload?.group);
+  if (msg.type === 'group.call.joined') return groupCallJoined(msg.payload);
+  if (msg.type === 'group.call.participant-joined') return groupParticipantJoined(msg.from, msg.payload);
+  if (msg.type === 'group.call.participant-left') return groupParticipantLeft(msg.payload);
+  if (msg.type === 'group.call.offer') return receiveGroupOffer(msg.from, msg.payload);
+  if (msg.type === 'group.call.answer') return receiveGroupAnswer(msg.from, msg.payload);
+  if (msg.type === 'group.call.ice') return receiveGroupIce(msg.from, msg.payload);
+  if (msg.type === 'group.call.state') return handleRemoteCallState(msg.from, msg.payload);
+  if (msg.type === 'group.call.end') return endCallUi('Групповой звонок завершён');
+
+  if (msg.type === 'call.offer') {
+    if (msg.payload?.renegotiate && state.call.target?.id === msg.from?.id && state.call.pc) return receiveRenegotiationOffer(msg.from, msg.payload);
+    return incomingCall(msg.from, msg.payload);
+  }
+  if (msg.type === 'call.answer') return receiveCallAnswer(msg.from, msg.payload);
+  if (msg.type === 'call.ice') return receiveIce(msg.from, msg.payload);
+  if (msg.type === 'call.state') return handleRemoteCallState(msg.from, msg.payload);
+  if (msg.type === 'call.reject') return endCallUi('Вызов отклонён');
+  if (msg.type === 'call.unavailable') return endCallUi('Пользователь не в сети');
+  if (msg.type === 'call.end') return endCallUi('Звонок завершён');
+}
+function clearAvatarCacheForUser(userId) {
+  const prefix = `${Number(userId)}:`;
+  for (const [key, url] of [...state.avatarUrls.entries()]) {
+    if (String(key).startsWith(prefix)) {
+      try { URL.revokeObjectURL(url); } catch {}
+      state.avatarUrls.delete(key);
+    }
+  }
+}
+
+async function getAvatarUrl(user, force = false) {
+  const userId = Number(user?.id);
+  if (!userId || !user?.hasAvatar) return null;
+  if (force) clearAvatarCacheForUser(userId);
+  const version = Number(user.avatarVersion || 0);
+  const key = `${userId}:${version}`;
+  if (state.avatarUrls.has(key)) return state.avatarUrls.get(key);
+  try {
+    const response = await api(`/api/users/${userId}/avatar?v=${version}&t=${Date.now()}`);
+    if (!response.ok) return null;
+    const url = URL.createObjectURL(await response.blob());
+    state.avatarUrls.set(key, url);
+    return url;
+  } catch { return null; }
+}
+
+async function setAvatar(el, user, force = false) {
+  if (!el || !user) return;
+  el.style.backgroundImage = '';
+  el.textContent = initialFor(user);
+  if (!user.hasAvatar || !user.id) return;
+  const url = await getAvatarUrl(user, force);
+  if (url && el.isConnected) { el.textContent = ''; el.style.backgroundImage = `url("${url}")`; }
+}
+function revokeObjectUrls() {
+  for (const url of state.avatarUrls.values()) URL.revokeObjectURL(url);
+  for (const url of state.mediaUrls.values()) URL.revokeObjectURL(url);
+  state.avatarUrls.clear(); state.mediaUrls.clear();
+}
+
+async function loadConversations() {
+  try {
+    const response = await api('/api/v2/conversations');
+    if (!response.ok) return;
+    state.conversations = (await response.json()).conversations;
+    renderConversations();
+  } catch {}
+}
+
+function renderConversations() {
+  const list = $('conversationList'); list.replaceChildren();
+  for (const conv of state.conversations) {
+    const button = document.createElement('button');
+    button.className = 'conversation' + (state.target?.kind === conv.kind && state.target?.data?.id === conv.target.id ? ' active' : '');
+    const avatar = document.createElement('div'); avatar.className = 'avatar' + (conv.kind === 'group' ? ' group-avatar' : '');
+    if (conv.kind === 'group') avatar.textContent = '👥'; else { setAvatar(avatar, conv.target); if (isUserOnline(conv.target.id)) avatar.classList.add('online-ring'); }
+    const text = document.createElement('div'); text.className = 'conv-text';
+    const name = document.createElement('div'); name.className = 'conv-name'; name.textContent = conv.kind === 'group' ? conv.target.name : displayName(conv.target);
+    const preview = document.createElement('div'); preview.className = 'conv-preview'; preview.textContent = `${conv.mine ? 'Вы: ' : ''}${conv.lastMessage || ''}`;
+    text.append(name, preview); button.append(avatar, text);
+    button.onclick = () => openConversation(conv.kind, conv.target);
+    list.append(button);
+  }
+}
+
+let searchTimer;
+async function searchUsers() {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(async () => {
+    const q = $('searchInput').value.trim();
+    if (!q) return $('searchResults').classList.add('hidden');
+    try {
+      const response = await api(`/api/users/search?q=${encodeURIComponent(q)}`);
+      if (!response.ok) return;
+      renderSearch((await response.json()).users);
+    } catch {}
+  }, 180);
+}
+
+function renderSearch(users) {
+  const box = $('searchResults'); box.replaceChildren();
+  if (!users.length) {
+    const empty = document.createElement('div'); empty.className = 'search-user'; empty.textContent = 'Никого не найдено'; box.append(empty);
+  } else {
+    for (const user of users) {
+      const row = document.createElement('div'); row.className = 'search-user';
+      const main = document.createElement('button'); main.className = 'search-main';
+      const avatar = document.createElement('div'); avatar.className = 'avatar'; setAvatar(avatar, user);
+      const meta = document.createElement('div'); meta.className = 'search-meta';
+      const title = document.createElement('div'); title.className = 'search-title'; title.textContent = displayName(user);
+      const login = document.createElement('div'); login.className = 'search-login'; login.textContent = `@${user.username}`;
+      meta.append(title, login); main.append(avatar, meta);
+      main.onclick = () => { openConversation('user', user); box.classList.add('hidden'); $('searchInput').value = ''; };
+      const info = document.createElement('button'); info.className = 'search-profile-btn'; info.textContent = 'ⓘ'; info.title = 'Профиль';
+      info.onclick = e => { e.stopPropagation(); openProfile(user.id); };
+      row.append(main, info); box.append(row);
+    }
+  }
+  box.classList.remove('hidden');
+}
+
+async function openConversation(kind, target) {
+  state.target = { kind, data: target };
+  state.currentMessages = [];
+  $('emptyState').classList.add('hidden'); $('chatView').classList.remove('hidden');
+  $('peerName').textContent = kind === 'group' ? target.name : displayName(target);
+  $('peerAvatar').classList.toggle('group-avatar', kind === 'group');
+  if (kind === 'group') { $('peerAvatar').style.backgroundImage=''; $('peerAvatar').textContent='👥'; } else setAvatar($('peerAvatar'), target);
+  $('callBtn').classList.remove('hidden');
+  $('callBtn').title = kind === 'group' ? 'Групповой звонок' : 'Позвонить';
+  $('callBtn').querySelector('span').textContent = kind === 'group' ? 'Звонок' : 'Позвонить';
+  updatePeerStatus();
+  renderConversations();
+  await loadMessages();
+  $('messageInput').focus();
+}
+
+async function loadMessages(options = {}) {
+  if (!state.target) return;
+  const { kind, data } = state.target;
+  const anchor = options.preserveScroll ? captureMessageScrollAnchor() : null;
+  try {
+    const response = await api(`/api/v2/messages/${kind}/${data.id}`);
+    if (!response.ok) return;
+    const payload = await response.json();
+    if (!state.target || state.target.kind !== kind || state.target.data.id !== data.id) return;
+    state.target.data = { ...state.target.data, ...payload.target };
+    renderMessages(payload.messages, { preserveScroll: Boolean(options.preserveScroll), anchor, scrollBottom: options.scrollBottom !== false });
+  } catch {}
+}
+
+function formatBytes(bytes) {
+  if (bytes == null) return '';
+  if (bytes < 1024) return `${bytes} Б`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} КБ`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} МБ`;
+}
+
+async function getFileUrl(msg) {
+  if (state.mediaUrls.has(msg.id)) return state.mediaUrls.get(msg.id);
+  try {
+    const response = await api(`/api/files/${msg.id}`);
+    if (!response.ok) return null;
+    const url = URL.createObjectURL(await response.blob());
+    state.mediaUrls.set(msg.id, url);
+    return url;
+  } catch { return null; }
+}
+
+function messageTime(msg) {
+  const d = new Date(msg.createdAt);
+  return d.toLocaleTimeString([], { hour:'2-digit', minute:'2-digit' });
+}
+
+function makeReactionsElement(msg) {
+  if (!msg.reactions?.length) return null;
+  const reactions = document.createElement('div');
+  reactions.className = 'reactions';
+  reactions.dataset.messageReactions = String(msg.id);
+  for (const r of msg.reactions) {
+    const chip = document.createElement('button');
+    chip.className = 'reaction-chip' + (r.mine ? ' mine' : '');
+    chip.textContent = `${r.emoji} ${r.count}`;
+    chip.onpointerdown = e => e.preventDefault();
+    chip.onclick = () => toggleReaction(msg.id, r.emoji);
+    reactions.append(chip);
+  }
+  return reactions;
+}
+
+function renderReactions(container, msg) {
+  const reactions = makeReactionsElement(msg);
+  if (reactions) container.append(reactions);
+}
+
+function patchMessageReactions(messageId, reactions) {
+  const msg = state.currentMessages.find(m => Number(m.id) === Number(messageId));
+  if (!msg) return false;
+  msg.reactions = Array.isArray(reactions) ? reactions : [];
+  const box = $('messages');
+  const row = [...box.querySelectorAll('.message-row')].find(el => Number(el.dataset.messageId) === Number(messageId));
+  if (!row) return false;
+  const stack = row.querySelector('.message-stack');
+  if (!stack) return false;
+
+  const oldScrollTop = box.scrollTop;
+  const rowTop = row.offsetTop;
+  const oldHeight = row.offsetHeight;
+  const old = stack.querySelector(':scope > .reactions');
+  const next = makeReactionsElement(msg);
+  if (old && next) old.replaceWith(next);
+  else if (old) old.remove();
+  else if (next) stack.append(next);
+
+  const delta = row.offsetHeight - oldHeight;
+  // Keep the viewport absolutely stable. If the edited row is fully above
+  // the viewport, compensate for its height change; otherwise retain the
+  // exact previous scrollTop. We never rebuild the whole message list.
+  box.scrollTop = rowTop + oldHeight <= oldScrollTop + 1 ? oldScrollTop + delta : oldScrollTop;
+  return true;
+}
+
+async function refreshMessageReactions(messageId) {
+  try {
+    const response = await api(`/api/messages/${messageId}/reactions`);
+    if (!response.ok) return;
+    const data = await response.json();
+    patchMessageReactions(messageId, data.reactions || []);
+  } catch {}
+}
+
+function patchMessageReceipt(messageId) {
+  const msg = state.currentMessages.find(m => Number(m.id) === Number(messageId));
+  if (!msg) return;
+  const row = [...$('messages').querySelectorAll('.message-row')].find(el => Number(el.dataset.messageId) === Number(messageId));
+  const bubble = row?.querySelector('.bubble');
+  const current = bubble?.querySelector('.bubble-meta');
+  if (!bubble || !current) return;
+  current.replaceWith(makeMessageMeta(msg));
+}
+
+function applyReadEvent(payload) {
+  const ids = (payload?.messageIds || []).map(Number);
+  for (const id of ids) {
