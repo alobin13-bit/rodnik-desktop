@@ -16,3 +16,8 @@ Thumbs.db
 *.keystore
 .vscode/
 .idea/
+# Generated from readable source parts / base64 asset sources
+src/renderer.js
+src/styles.css
+assets/icon.png
+assets/icon.ico
