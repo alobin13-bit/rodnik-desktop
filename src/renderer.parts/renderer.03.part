@@ -1,0 +1,244 @@
+    const msg = state.currentMessages.find(m => Number(m.id) === id);
+    if (!msg || Number(msg.senderId) !== Number(state.me?.id)) continue;
+    if (msg.groupId) {
+      msg.readByCount = Math.min(Number(msg.readRequiredCount || 0), Number(msg.readByCount || 0) + 1);
+      if (Number(msg.readRequiredCount || 0) > 0 && msg.readByCount >= Number(msg.readRequiredCount || 0)) msg.deliveryStatus = 'read';
+    } else {
+      msg.readByCount = 1;
+      msg.readRequiredCount = 1;
+      msg.deliveryStatus = 'read';
+    }
+    patchMessageReceipt(id);
+  }
+}
+
+async function hydrateMedia(msg, mediaEl) {
+  const url = await getFileUrl(msg);
+  if (!url || !mediaEl.isConnected) return;
+  mediaEl.src = url;
+  if (mediaEl.tagName === 'IMG') mediaEl.onclick = () => openMedia(url, 'image');
+}
+
+function captureMessageScrollAnchor() {
+  const box = $('messages');
+  if (!box || !box.children.length) return null;
+  const boxTop = box.getBoundingClientRect().top;
+  for (const row of box.querySelectorAll('.message-row')) {
+    if (row.getBoundingClientRect().bottom >= boxTop + 4) {
+      return { id: String(row.dataset.messageId || ''), offset: row.offsetTop - box.scrollTop };
+    }
+  }
+  return null;
+}
+
+function restoreMessageScrollAnchor(anchor) {
+  if (!anchor?.id) return false;
+  const box = $('messages');
+  const row = [...box.querySelectorAll('.message-row')].find(el => String(el.dataset.messageId || '') === anchor.id);
+  if (!row) return false;
+  box.scrollTop = Math.max(0, row.offsetTop - Number(anchor.offset || 0));
+  return true;
+}
+
+function makeMessageMeta(msg) {
+  const meta = document.createElement('div'); meta.className = 'bubble-meta';
+  const time = document.createElement('div'); time.className = 'bubble-time'; time.textContent = messageTime(msg); meta.append(time);
+  if (Number(msg.senderId) === Number(state.me?.id)) {
+    const status = document.createElement('span');
+    const delivery = msg.deliveryStatus || 'sent';
+    status.className = `message-status ${delivery}`;
+    if (delivery === 'read') {
+      status.textContent = '✓✓';
+      status.title = msg.groupId ? `Прочитано всеми (${msg.readByCount || 0}/${msg.readRequiredCount || 0})` : 'Прочитано';
+    }
+    else if (delivery === 'failed') { status.textContent = '!'; status.title = 'Не отправлено'; }
+    else if (delivery === 'sending') { status.textContent = '…'; status.title = 'Отправляем'; }
+    else {
+      status.textContent = '✓';
+      status.title = msg.groupId && msg.readRequiredCount ? `Отправлено • прочитали ${msg.readByCount || 0}/${msg.readRequiredCount}` : 'Отправлено';
+    }
+    meta.append(status);
+  }
+  return meta;
+}
+
+function renderMessages(messages, options = {}) {
+  const box = $('messages');
+  const anchor = options.preserveScroll ? (options.anchor || captureMessageScrollAnchor()) : null;
+  state.currentMessages = Array.isArray(messages) ? messages : [];
+  box.replaceChildren();
+  for (const msg of state.currentMessages) {
+    const mine = Number(msg.senderId) === Number(state.me.id);
+    const row = document.createElement('div'); row.className = 'message-row' + (mine ? ' mine' : '');
+    row.dataset.messageId = String(msg.id);
+    if (msg.deliveryStatus === 'failed') row.dataset.localFailed = 'true';
+    const react = document.createElement('button'); react.className = 'react-add'; react.textContent = '☺'; react.title = 'Реакция';
+    if (String(msg.id).startsWith('local-')) react.disabled = true;
+    react.onpointerdown = e => e.preventDefault();
+    react.onclick = e => openReactionPicker(msg.id, e.currentTarget);
+    const stack = document.createElement('div'); stack.className = 'message-stack';
+    if (isGroupTarget() && !mine && msg.sender) {
+      const sender = document.createElement('div'); sender.className = 'sender-label'; sender.textContent = displayName(msg.sender); stack.append(sender);
+    }
+    const bubble = document.createElement('div'); bubble.className = 'bubble';
+    if (msg.type === 'file' && String(msg.mimeType || '').startsWith('image/')) {
+      bubble.classList.add('media-bubble');
+      const img = document.createElement('img'); img.alt = msg.fileName || 'Фото';
+      const meta = document.createElement('div'); meta.className = 'media-meta';
+      const name = document.createElement('div'); name.className = 'media-filename'; name.textContent = msg.fileName || 'Фото';
+      const dl = document.createElement('button'); dl.className = 'download-btn'; dl.textContent = '↓'; dl.onclick = () => downloadFile(msg);
+      meta.append(name, dl, makeMessageMeta(msg)); bubble.append(img, meta); hydrateMedia(msg, img);
+    } else if (msg.type === 'file' && String(msg.mimeType || '').startsWith('video/')) {
+      bubble.classList.add('media-bubble');
+      const video = document.createElement('video'); video.controls = true; video.preload = 'metadata';
+      const meta = document.createElement('div'); meta.className = 'media-meta';
+      const name = document.createElement('div'); name.className = 'media-filename'; name.textContent = msg.fileName || 'Видео';
+      const dl = document.createElement('button'); dl.className = 'download-btn'; dl.textContent = '↓'; dl.onclick = () => downloadFile(msg);
+      meta.append(name, dl, makeMessageMeta(msg)); bubble.append(video, meta); hydrateMedia(msg, video);
+    } else if (msg.type === 'file') {
+      const wrap = document.createElement('div'); wrap.className = 'file-bubble';
+      const icon = document.createElement('div'); icon.className = 'file-icon'; icon.textContent = '↥';
+      const info = document.createElement('div'); info.className = 'file-info';
+      const name = document.createElement('div'); name.className = 'file-name'; name.textContent = msg.fileName || 'Файл';
+      const size = document.createElement('div'); size.className = 'file-size'; size.textContent = formatBytes(msg.fileSize);
+      info.append(name, size);
+      const dl = document.createElement('button'); dl.className = 'download-btn'; dl.textContent = '↓'; dl.title = 'Скачать'; dl.onclick = () => downloadFile(msg);
+      wrap.append(icon, info, dl); bubble.append(wrap, makeMessageMeta(msg));
+    } else {
+      const text = document.createElement('div'); text.className = 'bubble-text'; text.textContent = msg.content; bubble.append(text, makeMessageMeta(msg));
+    }
+    stack.append(bubble); renderReactions(stack, msg);
+    if (mine) row.append(react, stack); else row.append(stack, react);
+    box.append(row);
+  }
+  if (anchor && restoreMessageScrollAnchor(anchor)) return;
+  if (options.preserveScroll && Number.isFinite(options.scrollTop)) { box.scrollTop = options.scrollTop; return; }
+  if (options.scrollBottom !== false) box.scrollTop = box.scrollHeight;
+}
+
+async function sendMessage() {
+  const content = $('messageInput').value.trim();
+  if (!content || !state.target) return;
+  const targetSnapshot = { kind: state.target.kind, id: Number(state.target.data.id) };
+  $('messageInput').value = ''; resizeComposer(); sendTyping(false); clearTimeout(state.typingStopTimer); $('emojiPicker').classList.add('hidden');
+  const body = { content };
+  if (isUserTarget()) body.recipientId = state.target.data.id; else body.groupId = state.target.data.id;
+  const tempId = `local-${Date.now()}-${Math.random().toString(36).slice(2,8)}`;
+  const optimistic = {
+    id: tempId, senderId: state.me.id, recipientId: body.recipientId || null, groupId: body.groupId || null,
+    type:'text', content, createdAt:new Date().toISOString(), sender:state.me, reactions:[], deliveryStatus:'sending'
+  };
+  state.currentMessages = [...state.currentMessages, optimistic];
+  renderMessages(state.currentMessages, { scrollBottom:true });
+  const isSameTarget = () => state.target?.kind === targetSnapshot.kind && Number(state.target?.data?.id) === targetSnapshot.id;
+  try {
+    const response = await api('/api/messages', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });
+    const data = await response.json().catch(()=>({}));
+    if (!response.ok) {
+      if (isSameTarget()) {
+        const item = state.currentMessages.find(m => m.id === tempId); if (item) item.deliveryStatus = 'failed';
+        renderMessages(state.currentMessages, { preserveScroll:true });
+      }
+      toast(data.message || 'Не удалось отправить сообщение.');
+      return;
+    }
+    if (isSameTarget()) {
+      const idx = state.currentMessages.findIndex(m => m.id === tempId);
+      if (idx >= 0) state.currentMessages[idx] = { ...data.message, deliveryStatus:data.message?.deliveryStatus || 'sent' };
+      renderMessages(state.currentMessages, { scrollBottom:true });
+    }
+  } catch {
+    if (isSameTarget()) {
+      const item = state.currentMessages.find(m => m.id === tempId); if (item) item.deliveryStatus = 'failed';
+      renderMessages(state.currentMessages, { preserveScroll:true });
+    }
+    toast('Нет соединения с сервером.');
+  }
+}
+
+async function uploadFile(file) {
+  if (!state.target || !file) return;
+  if (file.size > state.config.maxFileMb * 1024 * 1024) return toast(`Файл больше ${state.config.maxFileMb} МБ.`);
+  const fd = new FormData();
+  if (isUserTarget()) fd.append('recipientId', String(state.target.data.id)); else fd.append('groupId', String(state.target.data.id));
+  fd.append('file', file, file.name);
+  toast(`Отправляем ${file.name}...`, 5000);
+  try {
+    const response = await api('/api/files', { method:'POST', body:fd });
+    if (!response.ok) { const data = await response.json().catch(()=>({})); return toast(data.message || 'Не удалось отправить файл.'); }
+    toast(String(file.type || '').startsWith('image/') ? 'Фото отправлено.' : String(file.type || '').startsWith('video/') ? 'Видео отправлено.' : 'Файл отправлен.');
+  } catch { toast('Ошибка загрузки файла.'); }
+}
+
+async function downloadFile(msg) {
+  try {
+    const response = await api(`/api/files/${msg.id}`);
+    if (!response.ok) return toast('Файл недоступен.');
+    const blob = await response.blob(); const url = URL.createObjectURL(blob);
+    const a = document.createElement('a'); a.href = url; a.download = msg.fileName || 'file'; document.body.append(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
+  } catch { toast('Не удалось скачать файл.'); }
+}
+
+function openMedia(url, type) {
+  const stage = $('mediaStage'); stage.replaceChildren();
+  const el = type === 'video' ? document.createElement('video') : document.createElement('img');
+  el.src = url; if (type === 'video') { el.controls = true; el.autoplay = true; }
+  stage.append(el); $('mediaModal').classList.remove('hidden');
+}
+
+function resizeComposer() {
+  const el = $('messageInput'); el.style.height = 'auto'; el.style.height = `${Math.min(el.scrollHeight, 140)}px`;
+}
+
+function buildEmojiPickers() {
+  const picker = $('emojiPicker'); picker.replaceChildren();
+  for (const emoji of EMOJIS) {
+    const b = document.createElement('button'); b.className = 'emoji-cell'; b.textContent = emoji;
+    b.onclick = () => insertEmoji(emoji); picker.append(b);
+  }
+  const reactions = $('reactionPicker'); reactions.replaceChildren();
+  for (const emoji of QUICK_REACTIONS) {
+    const b = document.createElement('button'); b.textContent = emoji; b.onclick = () => { if (state.reactionMessageId) toggleReaction(state.reactionMessageId, emoji); closeReactionPicker(); };
+    reactions.append(b);
+  }
+}
+
+function insertEmoji(emoji) {
+  const input = $('messageInput'); const start = input.selectionStart ?? input.value.length; const end = input.selectionEnd ?? start;
+  input.value = input.value.slice(0,start) + emoji + input.value.slice(end); input.focus(); input.selectionStart = input.selectionEnd = start + emoji.length; resizeComposer();
+}
+
+function openReactionPicker(messageId, button) {
+  state.reactionMessageId = messageId;
+  const picker = $('reactionPicker'); const rect = button.getBoundingClientRect();
+  picker.style.left = `${Math.max(8, Math.min(window.innerWidth - 330, rect.left - 120))}px`;
+  picker.style.top = `${Math.max(8, rect.top - 52)}px`; picker.classList.remove('hidden');
+}
+function closeReactionPicker() { state.reactionMessageId = null; $('reactionPicker').classList.add('hidden'); }
+
+async function toggleReaction(messageId, emoji) {
+  const box = $('messages');
+  const scrollTop = box.scrollTop;
+  const keepBottom = messagesNearBottom();
+  try {
+    const response = await api(`/api/messages/${messageId}/reactions`, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ emoji }) });
+    const data = await response.json().catch(()=>({}));
+    if (!response.ok) return toast('Не удалось поставить реакцию.');
+    patchMessageReactions(messageId, data.reactions || []);
+    queueMicrotask(() => { box.scrollTop = keepBottom ? box.scrollHeight : scrollTop; });
+  } catch { toast('Нет соединения с сервером.'); }
+}
+
+async function openProfile(userId) {
+  try {
+    const response = await api(`/api/users/${userId}/profile`); if (!response.ok) return toast('Профиль недоступен.');
+    const user = (await response.json()).user; const own = user.id === state.me.id;
+    $('profileDisplayName').textContent = displayName(user); $('profileUsername').textContent = `@${user.username}`;
+    const online = isUserOnline(user.id) || (own && state.ws?.readyState === WebSocket.OPEN);
+    $('profileStatus').textContent = online ? 'В сети' : 'Не в сети';
+    $('profileStatus').classList.toggle('online', online);
+    $('profileBioText').textContent = user.bio || (own ? 'Добавьте описание профиля.' : 'Описание не указано.');
+    await setAvatar($('profileAvatar'), user);
+    $('profileEdit').classList.toggle('hidden', !own);
+    if (own) { $('profileNameInput').value = user.displayName === user.username ? '' : user.displayName; $('profileBioInput').value = user.bio || ''; $('removeAvatarBtn').classList.toggle('hidden', !user.hasAvatar); }
