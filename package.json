@@ -1,0 +1,62 @@
+{
+  "name": "rodnik-desktop",
+  "version": "0.6.4",
+  "private": false,
+  "description": "Rodnik desktop messenger with chats, groups, calls, screen sharing, profiles, reactions and automatic updates",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "check": "node --check main.js && node --check preload.js && node --check src/renderer.js",
+    "dist:win": "electron-builder --win nsis --publish never",
+    "set-server": "node scripts/set-server.js",
+    "test:install": "powershell -ExecutionPolicy Bypass -File scripts/test-install.ps1"
+  },
+  "devDependencies": {
+    "electron": "43.4.1",
+    "electron-builder": "26.15.3"
+  },
+  "build": {
+    "appId": "com.knock.messenger",
+    "productName": "Rodnik",
+    "asar": true,
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "src/**/*",
+      "assets/**/*",
+      "package.json"
+    ],
+    "win": {
+      "icon": "assets/icon.ico",
+      "target": [
+        "nsis"
+      ]
+    },
+    "nsis": {
+      "oneClick": true,
+      "createDesktopShortcut": "always",
+      "createStartMenuShortcut": true,
+      "shortcutName": "Rodnik",
+      "runAfterFinish": true,
+      "include": "build/installer.nsh",
+      "perMachine": false,
+      "deleteAppDataOnUninstall": false,
+      "artifactName": "Rodnik Setup ${version}.${ext}"
+    },
+    "publish": [
+      {
+        "provider": "generic",
+        "url": "https://rodnik.space/updates"
+      }
+    ]
+  },
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "dependencies": {
+    "electron-updater": "6.8.9"
+  }
+}
