@@ -1,0 +1,246 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src http: https: ws: wss:; style-src 'self'; script-src 'self';" />
+  <title>Rodnik</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body data-theme="dark">
+  <div id="toast" class="toast hidden"></div>
+  <div id="updateBanner" class="update-banner hidden"><span id="updateText">Обновление Rodnik готово</span><button id="restartUpdateBtn">Установить сейчас</button><button id="laterUpdateBtn" class="update-later">Позже</button></div>
+
+  <section id="authScreen" class="auth-screen">
+    <div class="auth-card">
+      <div class="brand-lockup">
+        <img src="../assets/icon.png" class="auth-logo" alt="Rodnik" />
+        <div><h1>Rodnik</h1><p>Будь на связи. Без лишнего.</p></div>
+      </div>
+      <div class="auth-tabs">
+        <button id="registerTab" class="tab active">Регистрация</button>
+        <button id="loginTab" class="tab">Вход</button>
+      </div>
+      <form id="authForm">
+        <label>Логин</label>
+        <input id="usernameInput" autocomplete="username" maxlength="32" placeholder="например, alex" required />
+        <label>Пароль</label>
+        <input id="passwordInput" type="password" autocomplete="new-password" maxlength="128" placeholder="минимум 8 символов" required />
+        <button id="authSubmit" class="primary" type="submit">Создать аккаунт</button>
+      </form>
+      <div id="authError" class="auth-error hidden"></div>
+      <button id="switchToLogin" class="link-button hidden">Такой логин уже есть — войти</button>
+      <details class="server-details">
+        <summary>Сервер</summary>
+        <div class="server-row">
+          <input id="serverInput" placeholder="https://rodnik.space" />
+          <button id="saveServerBtn" type="button" class="secondary">Сохранить</button>
+        </div>
+        <small>Для публичного сервера лучше использовать HTTPS.</small>
+      </details>
+    </div>
+  </section>
+
+  <section id="appScreen" class="app-shell hidden">
+    <aside class="sidebar">
+      <div class="sidebar-top">
+        <img src="../assets/icon.png" class="mini-logo" alt="" />
+        <div class="brand-name">Rodnik</div>
+        <button id="newGroupBtn" class="icon-button" title="Создать группу">＋</button>
+        <button id="settingsBtn" class="icon-button" title="Настройки">⚙</button>
+        <button id="logoutBtn" class="icon-button" title="Выйти">↪</button>
+      </div>
+
+      <button id="meCard" class="me-card">
+        <div class="avatar" id="meAvatar">R</div>
+        <div class="me-text">
+          <div id="meDisplayName" class="me-name"></div>
+          <div id="meUsername" class="me-login"></div>
+        </div>
+        <span class="profile-chevron">›</span>
+      </button>
+
+      <div class="search-box">
+        <span>⌕</span>
+        <input id="searchInput" placeholder="Поиск по логину или имени" autocomplete="off" />
+      </div>
+      <div id="searchResults" class="search-results hidden"></div>
+
+      <div class="section-title">Чаты</div>
+      <div id="conversationList" class="conversation-list"></div>
+    </aside>
+
+    <main class="chat-panel">
+      <div id="emptyState" class="empty-state">
+        <img src="../assets/icon.png" alt="Rodnik" />
+        <h2>Выберите чат</h2>
+        <p>Найдите человека или создайте группу.</p>
+      </div>
+
+      <div id="chatView" class="chat-view hidden">
+        <header class="chat-header">
+          <button id="targetInfoBtn" class="peer-wrap">
+            <div class="avatar" id="peerAvatar"></div>
+            <div class="peer-copy">
+              <div id="peerName" class="peer-name"></div>
+              <div id="peerSub" class="peer-sub"></div>
+            </div>
+          </button>
+          <div class="header-actions">
+            <button id="callBtn" class="call-button" title="Позвонить">☎ <span>Позвонить</span></button>
+          </div>
+        </header>
+
+        <div id="messages" class="messages"></div>
+
+        <div class="composer-wrap">
+          <div id="emojiPicker" class="emoji-picker hidden"></div>
+          <div class="composer">
+            <input id="fileInput" type="file" hidden />
+            <button id="attachBtn" class="attach-button" title="Отправить файл">＋</button>
+            <button id="emojiBtn" class="attach-button emoji-open" title="Смайлики">☺</button>
+            <textarea id="messageInput" rows="1" maxlength="5000" placeholder="Сообщение..."></textarea>
+            <button id="sendBtn" class="send-button">➤</button>
+          </div>
+        </div>
+      </div>
+    </main>
+  </section>
+
+  <div id="reactionPicker" class="reaction-picker hidden"></div>
+
+  <div id="profileModal" class="modal hidden">
+    <div class="modal-card profile-card">
+      <button class="modal-close" data-close="profileModal">✕</button>
+      <div id="profileAvatar" class="avatar profile-avatar">R</div>
+      <h2 id="profileDisplayName"></h2>
+      <div id="profileUsername" class="profile-login"></div>
+      <div id="profileStatus" class="profile-status"></div>
+      <p id="profileBioText" class="profile-bio"></p>
+
+      <div id="profileEdit" class="profile-edit hidden">
+        <input id="avatarInput" type="file" accept="image/png,image/jpeg,image/webp,image/gif" hidden />
+        <div class="profile-buttons">
+          <button id="changeAvatarBtn" class="secondary">Изменить фото</button>
+          <button id="removeAvatarBtn" class="ghost-danger">Удалить фото</button>
+        </div>
+        <label>Имя</label>
+        <input id="profileNameInput" maxlength="50" placeholder="Имя в Rodnik" />
+        <label>О себе</label>
+        <textarea id="profileBioInput" maxlength="300" rows="4" placeholder="Расскажите немного о себе"></textarea>
+        <button id="saveProfileBtn" class="primary compact-primary">Сохранить профиль</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="groupModal" class="modal hidden">
+    <div class="modal-card group-create-card">
+      <button class="modal-close" data-close="groupModal">✕</button>
+      <h2>Новая группа</h2>
+      <label>Название</label>
+      <input id="groupNameInput" maxlength="80" placeholder="Например, Команда Rodnik" />
+      <label>Добавить участников</label>
+      <div class="search-box modal-search"><span>⌕</span><input id="groupMemberSearch" placeholder="Введите логин" autocomplete="off" /></div>
+      <div id="groupMemberResults" class="member-results"></div>
+      <div id="selectedMembers" class="selected-members"></div>
+      <button id="createGroupBtn" class="primary compact-primary">Создать группу</button>
+    </div>
+  </div>
+
+  <div id="groupInfoModal" class="modal hidden">
+    <div class="modal-card group-info-card">
+      <button class="modal-close" data-close="groupInfoModal">✕</button>
+      <div class="group-big-avatar">👥</div>
+      <h2 id="groupInfoName"></h2>
+      <div id="groupInfoCount" class="profile-login"></div>
+      <div class="section-title modal-section">Участники</div>
+      <div id="groupInfoMembers" class="group-member-list"></div>
+      <div id="groupInfoManage" class="group-manage hidden">
+        <div class="section-title modal-section">Добавить участника</div>
+        <div class="search-box modal-search"><span>⌕</span><input id="groupAddSearch" placeholder="Введите логин" autocomplete="off" /></div>
+        <div id="groupAddResults" class="member-results"></div>
+        <button id="deleteGroupBtn" class="danger-wide">Удалить группу</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="settingsModal" class="modal hidden">
+    <div class="modal-card settings-card">
+      <button class="modal-close" data-close="settingsModal">✕</button>
+      <h2>Настройки</h2>
+      <div class="settings-section">
+        <label for="themeSelect">Тема</label>
+        <select id="themeSelect">
+          <option value="dark">Тёмная</option>
+          <option value="light">Светлая</option>
+        </select>
+        <div class="setting-note">Тёмная тема используется по умолчанию.</div>
+      </div>
+      <label class="setting-toggle">
+        <input id="lowBandwidthCallsInput" type="checkbox" />
+        <span>
+          <strong>Экономить трафик во время звонков</strong>
+          <small>Снижает сетевую нагрузку звонка и демонстрации экрана, чтобы меньше влиять на пинг в играх.</small>
+        </span>
+      </label>
+      <button id="saveSettingsBtn" class="primary compact-primary">Сохранить настройки</button>
+    </div>
+  </div>
+
+  <div id="miniCallBar" class="mini-call hidden">
+    <button id="miniCallExpand" class="mini-call-main" title="Развернуть звонок">
+      <span class="mini-call-icon">☎</span>
+      <span class="mini-call-copy">
+        <strong id="miniCallName">Звонок</strong>
+        <small id="miniCallStatus">Разговор</small>
+      </span>
+    </button>
+    <button id="miniMuteBtn" class="mini-call-control" title="Микрофон">🎙</button>
+    <button id="miniScreenBtn" class="mini-call-control" title="Демонстрация экрана">▣</button>
+    <button id="miniEndCallBtn" class="mini-call-control danger-mini" title="Завершить звонок">✕</button>
+  </div>
+
+  <div id="callModal" class="modal hidden">
+    <div id="callCard" class="call-card">
+      <div id="callEventToast" class="call-event-toast hidden"></div>
+      <div id="callVideoStage" class="call-video-stage hidden">
+        <video id="remoteVideo" autoplay playsinline></video>
+        <div id="groupVideoGrid" class="group-video-grid hidden"></div>
+        <video id="localScreenPreview" autoplay muted playsinline class="local-screen-preview hidden"></video>
+      </div>
+      <div id="callIdentity" class="call-identity">
+        <div class="call-rings"><div class="avatar big" id="callAvatar">R</div></div>
+        <h2 id="callTitle">Звонок</h2>
+      </div>
+      <p id="callStatus">Соединение...</p>
+      <div id="incomingActions" class="call-actions hidden">
+        <button id="rejectCallBtn" class="danger-round">✕</button>
+        <button id="acceptCallBtn" class="accept-round">☎</button>
+      </div>
+      <div id="activeActions" class="call-actions hidden">
+        <button id="callMinimizeBtn" class="round minimize-round" title="Свернуть звонок">—</button>
+        <button id="muteBtn" class="round" title="Микрофон">🎙</button>
+        <button id="screenBtn" class="round screen-round" title="Демонстрация экрана">▣</button>
+        <button id="endCallBtn" class="danger-round" title="Завершить">✕</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="screenPickerModal" class="modal hidden">
+    <div class="modal-card screen-picker-card">
+      <button class="modal-close" data-close="screenPickerModal">✕</button>
+      <h2>Что показать?</h2>
+      <p class="modal-hint">Выберите экран или окно.</p>
+      <div id="screenSources" class="screen-sources"></div>
+    </div>
+  </div>
+
+  <div id="mediaModal" class="modal hidden">
+    <button class="media-close" data-close="mediaModal">✕</button>
+    <div id="mediaStage" class="media-stage"></div>
+  </div>
+
+  <audio id="remoteAudio" autoplay></audio>
+  <script src="renderer.js"></script>
+</body>
+</html>
