@@ -1,0 +1,42 @@
+name: Windows build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Syntax checks
+        run: npm run check
+
+      - name: Build NSIS installer
+        run: npm run dist:win
+
+      - name: Upload unsigned Windows build
+        uses: actions/upload-artifact@v4
+        with:
+          name: rodnik-windows-unsigned
+          path: |
+            dist/Rodnik Setup *.exe
+            dist/*.blockmap
+            dist/latest.yml
+          if-no-files-found: error
