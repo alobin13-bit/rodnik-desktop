@@ -5,11 +5,12 @@
   "description": "Rodnik desktop messenger with chats, groups, calls, screen sharing, profiles, reactions and automatic updates",
   "main": "main.js",
   "scripts": {
-    "start": "electron .",
-    "check": "node --check main.js && node --check preload.js && node --check src/renderer.js",
-    "dist:win": "electron-builder --win nsis --publish never",
+    "start": "npm run prepare-source && electron .",
+    "check": "npm run prepare-source && node --check main.js && node --check preload.js && node --check src/renderer.js",
+    "dist:win": "npm run prepare-source && electron-builder --win nsis --publish never",
     "set-server": "node scripts/set-server.js",
-    "test:install": "powershell -ExecutionPolicy Bypass -File scripts/test-install.ps1"
+    "test:install": "powershell -ExecutionPolicy Bypass -File scripts/test-install.ps1",
+    "prepare-source": "node scripts/prepare-source.js"
   },
   "devDependencies": {
     "electron": "43.4.1",
